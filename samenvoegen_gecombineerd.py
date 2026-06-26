@@ -249,8 +249,9 @@ def parse_rows(rows):
     return data, telslang_headers
 
 
-def lees_info_coordinaten(path):
-    """Lees locatienaam/plaats en lat/lon uit het Info-blad van een xlsx."""
+def lees_info_velden(path):
+    """Lees Code, Naam, Plaats en lat/lon uit het Info-blad van een xlsx.
+    Geeft altijd een dict terug (ontbrekende velden zijn None)."""
     try:
         wb = load_workbook(path, read_only=True, data_only=True)
     except Exception:
@@ -265,23 +266,24 @@ def lees_info_coordinaten(path):
         except (TypeError, ValueError):
             return None
 
-    naam = plaats = lat = lon = None
+    code = naam = plaats = lat = lon = None
     for row in rows:
         cells = [("" if c is None else str(c)).strip() for c in row]
         if not cells:
             continue
-        if cells[0].lower() == "naam" and naam is None:
+        sleutel = cells[0].lower()
+        if sleutel == "code" and code is None:
+            code = next((c for c in cells[1:] if c), None)
+        elif sleutel == "naam" and naam is None:
             naam = next((c for c in cells[1:] if c), None)
-        if cells[0].lower() == "plaats" and plaats is None:
+        elif sleutel == "plaats" and plaats is None:
             plaats = next((c for c in cells[1:] if c), None)
         for i, c in enumerate(cells):
             if c.lower() == "locatie" and i + 2 < len(row):
                 a, b = f(row[i + 1]), f(row[i + 2])
                 if a is not None and b is not None:
                     lat, lon = a, b
-    if lat is None or lon is None:
-        return None
-    return {"naam": naam, "plaats": plaats, "lat": lat, "lon": lon}
+    return {"code": code, "naam": naam, "plaats": plaats, "lat": lat, "lon": lon}
 
 
 def detecteer_type(path):
@@ -330,14 +332,22 @@ def detecteer_type(path):
 
 def verwerk_bestand(path, verwacht_label):
     """Lees een bestand en geef de rijen van het verwachte type terug.
-    Voor xlsx wordt automatisch het juiste data-tabblad gekozen."""
+    Code en Naam komen uit het Info-blad; voor xlsx wordt automatisch het
+    juiste data-tabblad gekozen."""
     p = Path(path)
-    locatie = p.stem
+    info = lees_info_velden(path) if p.suffix.lower() == ".xlsx" else None
+    code = (info or {}).get("code") or ""
+    naam = (info or {}).get("naam") or p.stem
+
+    def _label(rows):
+        for d in rows:
+            d["Code"] = code
+            d["Naam"] = naam
+        return rows
+
     if p.suffix.lower() == ".csv":
         data, headers = parse_rows(read_csv_rows(path))
-        typed = [d for d in data if d["Voertuigtype"] == verwacht_label]
-        for d in typed:
-            d["Locatie"] = locatie
+        typed = _label([d for d in data if d["Voertuigtype"] == verwacht_label])
         return typed, (headers if verwacht_label == TELSLANG_VOERTUIGTYPE else None)
 
     try:
@@ -352,9 +362,7 @@ def verwerk_bestand(path, verwacht_label):
         data, headers = parse_rows(read_xlsx_rows(path, s))
         typed = [d for d in data if d["Voertuigtype"] == verwacht_label]
         if typed:
-            for d in typed:
-                d["Locatie"] = locatie
-            return typed, headers
+            return _label(typed), headers
     return [], None
 
 
@@ -378,7 +386,7 @@ def build_output(all_rows, telslang_headers, dagdelen):
     if telslang_headers:
         lengte_groepen, snelheid_groepen = groepeer_klassen(telslang_headers)
 
-    columns = ["Locatie", "Voertuigtype", "Datum", "Dagsoort", "Van", "Tot", "Dagdeel", "Richting"]
+    columns = ["Code", "Naam", "Voertuigtype", "Datum", "Dagsoort", "Van", "Tot", "Dagdeel", "Richting"]
     if telslang_headers:
         columns += list(telslang_headers)
         columns += [f"Totaal lengte {l}" for l in lengte_groepen]
@@ -390,7 +398,7 @@ def build_output(all_rows, telslang_headers, dagdelen):
     for d in all_rows:
         dagsoort = bepaal_dagsoort(d["Datum"])
         dagdeel = bepaal_dagdeel(d["Tijd"], dagdelen)
-        row = [d["Locatie"], d["Voertuigtype"], d["Datum"], dagsoort,
+        row = [d["Code"], d["Naam"], d["Voertuigtype"], d["Datum"], dagsoort,
                d["Tijd"], eindtijd_van(d["Tijd"]), dagdeel, d["Richting"]]
         if telslang_headers:
             is_tel = bool(d["classes"])
@@ -442,11 +450,11 @@ def kleur_kolomtitels(ws, out_header):
 def pivot_specs(out_header):
     """Definieer de overzichtstabbladen op basis van beschikbare kolommen."""
     specs = [
-        {"sheet": "Locatie x dagdeel", "rows": ["Locatie", "Voertuigtype"],
+        {"sheet": "Locatie x dagdeel", "rows": ["Naam", "Voertuigtype"],
          "col": "Dagdeel", "data": [("Totaal", "sum", "Som van Totaal")]},
-        {"sheet": "Locatie x weekdag-weekend", "rows": ["Locatie", "Voertuigtype"],
+        {"sheet": "Locatie x weekdag-weekend", "rows": ["Naam", "Voertuigtype"],
          "col": "Dagsoort", "data": [("Totaal", "sum", "Som van Totaal")]},
-        {"sheet": "Etmaal per locatie per dag", "rows": ["Locatie", "Datum"],
+        {"sheet": "Etmaal per locatie per dag", "rows": ["Naam", "Datum"],
          "col": "Voertuigtype", "data": [("Totaal", "sum", "Som van Totaal")]},
     ]
     speed_cols = [h for h in out_header if h.startswith("Totaal snelheid ")]
@@ -456,7 +464,7 @@ def pivot_specs(out_header):
             data.append(("Gem.", "average", "Gemiddelde snelheid"))
         if "V85" in out_header:
             data.append(("V85", "average", "V85 (gem.)"))
-        specs.append({"sheet": "Snelheidsverdeling per loc", "rows": ["Locatie"],
+        specs.append({"sheet": "Snelheidsverdeling per loc", "rows": ["Naam"],
                       "col": None, "data": data})
 
     geldig = []
@@ -574,7 +582,7 @@ def voeg_pivots_toe_com(output_file, out_header, n_rows):
 
 def schrijf_uitvoer(output_file, out_header, out_rows):
     """Schrijf de data weg en geef terug welke overzichten zijn toegevoegd."""
-    datum_kolom = 3
+    datum_kolom = out_header.index("Datum") + 1
     if output_file.lower().endswith(".xlsx"):
         wb = Workbook(); ws = wb.active; ws.title = "Samengevoegd"
         ws.append(out_header)
@@ -613,12 +621,12 @@ def vind_gaten(all_rows, start_uur=6, eind_uur=24, min_run=2):
         uur = int(m.group(1))
         if uur < start_uur or uur >= eind_uur:
             continue
-        key = (d["Locatie"], d["Voertuigtype"], d["Richting"], d["Datum"])
+        key = (d.get("Code", ""), d.get("Naam", ""), d["Voertuigtype"], d["Richting"], d["Datum"])
         groepen.setdefault(key, {})
         groepen[key][uur] = groepen[key].get(uur, 0) + _num(d.get("Totaal", ""))
 
     gaten = []
-    for key in sorted(groepen, key=lambda k: (k[0], k[1], k[3], k[2])):
+    for key in sorted(groepen, key=lambda k: (k[1], k[2], k[4], k[3])):
         uren = groepen[key]
         run_start = None
         for uur in range(start_uur, eind_uur + 1):
@@ -627,8 +635,8 @@ def vind_gaten(all_rows, start_uur=6, eind_uur=24, min_run=2):
                 run_start = uur
             elif not is_nul and run_start is not None:
                 if uur - run_start >= min_run:
-                    gaten.append({"Locatie": key[0], "Voertuigtype": key[1],
-                                  "Richting": key[2], "Datum": key[3],
+                    gaten.append({"Code": key[0], "Naam": key[1], "Voertuigtype": key[2],
+                                  "Richting": key[3], "Datum": key[4],
                                   "van": run_start, "tot": uur, "uren": uur - run_start})
                 run_start = None
     return gaten
@@ -641,7 +649,8 @@ def gaten_overzicht_tekst(gaten):
              "(minimaal 2 aaneengesloten lege uren tussen 06:00 en 24:00):", ""]
     for g in gaten:
         datum = g["Datum"].strftime("%d-%m-%Y") if hasattr(g["Datum"], "strftime") else str(g["Datum"])
-        lines.append(f"- {g['Locatie']} | {g['Voertuigtype']} | {g['Richting']} | "
+        loc = f"{g['Code']} {g['Naam']}".strip()
+        lines.append(f"- {loc} | {g['Voertuigtype']} | {g['Richting']} | "
                      f"{datum} | {g['van']:02d}:00-{g['tot']:02d}:00 ({g['uren']} uur leeg)")
     return "\n".join(lines)
 
@@ -822,8 +831,8 @@ class App:
             zone["files"].append(p)
             zone["listbox"].insert("end", Path(p).name)
             if p.lower().endswith(".xlsx"):
-                info = lees_info_coordinaten(p)
-                if info:
+                info = lees_info_velden(p)
+                if info and info.get("lat") is not None:
                     self.coords[p] = info
         self._ververs_kaart()
         self.status.config(
