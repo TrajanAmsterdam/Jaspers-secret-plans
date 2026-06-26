@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from openpyxl import load_workbook, Workbook
+from openpyxl.styles import PatternFill
 
 # Optionele onderdelen: slepen-en-neerzetten en kaart. Ontbreken ze, dan
 # blijft de tool werken (zonder die functie).
@@ -346,6 +347,35 @@ def build_output(all_rows, telslang_headers, dagdelen):
     return columns, out_rows
 
 
+# Lichte kleuren voor kolomtitels, per lengteklasse op volgorde van voorkomen
+KOLOM_KLEUREN = ["FCE4D6", "E2EFDA", "DDEBF7", "FFF2CC", "EAD1DC", "FCE4D6"]
+
+
+def _lengte_van_kolom(naam):
+    """Geeft de lengteklasse van een kolomtitel, of None als die er niet is."""
+    if naam.startswith("Totaal lengte "):
+        return naam[len("Totaal lengte "):].strip()
+    if ";" in naam:
+        return naam.split(";")[0].strip()
+    return None
+
+
+def kleur_kolomtitels(ws, out_header):
+    """Kleur de kolomtitels (rij 1) per lengteklasse met lichte tinten."""
+    volgorde = []
+    for naam in out_header:
+        lk = _lengte_van_kolom(naam)
+        if lk and lk not in volgorde:
+            volgorde.append(lk)
+    kleur_map = {lk: KOLOM_KLEUREN[i % len(KOLOM_KLEUREN)] for i, lk in enumerate(volgorde)}
+    for c, naam in enumerate(out_header, start=1):
+        lk = _lengte_van_kolom(naam)
+        if lk in kleur_map:
+            kl = kleur_map[lk]
+            ws.cell(row=1, column=c).fill = PatternFill(
+                start_color=kl, end_color=kl, fill_type="solid")
+
+
 def schrijf_uitvoer(output_file, out_header, out_rows):
     datum_kolom = 3
     if output_file.lower().endswith(".xlsx"):
@@ -355,6 +385,7 @@ def schrijf_uitvoer(output_file, out_header, out_rows):
             ws.append(row)
         for ri in range(2, len(out_rows) + 2):
             ws.cell(row=ri, column=datum_kolom).number_format = "DD-MM-YYYY"
+        kleur_kolomtitels(ws, out_header)
         wb.save(output_file)
     else:
         with open(output_file, "w", newline="", encoding="utf-8-sig") as f:
