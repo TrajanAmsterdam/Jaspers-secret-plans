@@ -579,7 +579,20 @@ def main():
                 writer.writerow(csv_row)
 
     print(f"Klaar! {len(out_rows)} rijen geschreven naar {output_file}")
+    messagebox.showinfo(
+        "Klaar",
+        f"{len(out_rows)} rijen geschreven naar:\n{output_file}\n\n"
+        f"({n_fiets} fiets, {n_telslang} telslang/moto)",
+    )
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as exc:
+        import traceback
+        traceback.print_exc()
+        try:
+            messagebox.showerror("Fout", f"Er ging iets mis:\n\n{exc}")
+        except Exception:
+            pass
