@@ -126,6 +126,13 @@ def bepaal_dagdeel(tijd_str, dagdelen):
     return ""
 
 
+DAGNAMEN = ["maandag", "dinsdag", "woensdag", "donderdag", "vrijdag", "zaterdag", "zondag"]
+
+
+def dagnaam_van(datum):
+    return DAGNAMEN[datum.weekday()]
+
+
 def bepaal_dagsoort(datum):
     return "weekenddag" if datum.weekday() >= 5 else "weekdag"
 
@@ -386,7 +393,7 @@ def build_output(all_rows, telslang_headers, dagdelen):
     if telslang_headers:
         lengte_groepen, snelheid_groepen = groepeer_klassen(telslang_headers)
 
-    columns = ["Code", "Naam", "Voertuigtype", "Datum", "Dagsoort", "Van", "Tot", "Dagdeel", "Richting"]
+    columns = ["Code", "Naam", "Voertuigtype", "Datum", "Dag", "Dagsoort", "Van", "Tot", "Dagdeel", "Richting"]
     if telslang_headers:
         columns += list(telslang_headers)
         columns += [f"Totaal lengte {l}" for l in lengte_groepen]
@@ -398,7 +405,7 @@ def build_output(all_rows, telslang_headers, dagdelen):
     for d in all_rows:
         dagsoort = bepaal_dagsoort(d["Datum"])
         dagdeel = bepaal_dagdeel(d["Tijd"], dagdelen)
-        row = [d["Code"], d["Naam"], d["Voertuigtype"], d["Datum"], dagsoort,
+        row = [d["Code"], d["Naam"], d["Voertuigtype"], d["Datum"], dagnaam_van(d["Datum"]), dagsoort,
                d["Tijd"], eindtijd_van(d["Tijd"]), dagdeel, d["Richting"]]
         if telslang_headers:
             is_tel = bool(d["classes"])
