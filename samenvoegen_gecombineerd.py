@@ -574,22 +574,10 @@ def schrijf_uitvoer(output_file, out_header, out_rows):
         for ri in range(2, len(out_rows) + 2):
             ws.cell(row=ri, column=datum_kolom).number_format = "DD-MM-YYYY"
         kleur_kolomtitels(ws, out_header)
-        if not HAS_COM:
-            voeg_static_overzichten_toe(wb, out_header, out_rows)
         wb.save(output_file)
-        if HAS_COM:
-            try:
-                voeg_pivots_toe_com(output_file, out_header, len(out_rows))
-                return "interactief"
-            except Exception:
-                try:
-                    wb2 = load_workbook(output_file)
-                    voeg_static_overzichten_toe(wb2, out_header, out_rows)
-                    wb2.save(output_file)
-                except Exception:
-                    pass
-                return "statisch"
-        return "statisch"
+        # Draaitabellen (interactief via COM / statisch) zijn voorlopig uitgezet;
+        # de functies hieronder blijven beschikbaar om later weer in te schakelen.
+        return "geen"
     else:
         with open(output_file, "w", newline="", encoding="utf-8-sig") as f:
             writer = csv.writer(f, delimiter=";")
@@ -948,7 +936,7 @@ class App:
             self.status.config(text="Opslaan geannuleerd.")
             return
 
-        self.status.config(text="Bezig met opslaan en draaitabellen maken..."); self.root.update()
+        self.status.config(text="Bezig met opslaan..."); self.root.update()
         try:
             note = schrijf_uitvoer(output_file, out_header, out_rows)
         except PermissionError:
