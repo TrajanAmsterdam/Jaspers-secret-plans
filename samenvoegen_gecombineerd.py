@@ -4,7 +4,7 @@ import re
 from pathlib import Path
 from datetime import datetime, timedelta
 import tkinter as tk
-from tkinter import filedialog, messagebox
+from tkinter import filedialog, messagebox, ttk
 from openpyxl import load_workbook, Workbook
 
 # Optionele onderdelen: slepen-en-neerzetten en kaart. Ontbreken ze, dan
@@ -367,6 +367,54 @@ def schrijf_uitvoer(output_file, out_header, out_rows):
 
 
 # ---------------------------------------------------------------------------
+# Gatencontrole
+# ---------------------------------------------------------------------------
+
+def vind_gaten(all_rows, start_uur=6, eind_uur=24, min_run=2):
+    """Zoek per (Locatie, Voertuigtype, Richting, Datum) naar runs van
+    >= min_run aaneengesloten uren met 0 tellingen, binnen [start_uur, eind_uur)."""
+    groepen = {}
+    for d in all_rows:
+        m = re.match(r"^(\d{1,2}):", str(d.get("Tijd", "")))
+        if not m:
+            continue
+        uur = int(m.group(1))
+        if uur < start_uur or uur >= eind_uur:
+            continue
+        key = (d["Locatie"], d["Voertuigtype"], d["Richting"], d["Datum"])
+        groepen.setdefault(key, {})
+        groepen[key][uur] = groepen[key].get(uur, 0) + _num(d.get("Totaal", ""))
+
+    gaten = []
+    for key in sorted(groepen, key=lambda k: (k[0], k[1], k[3], k[2])):
+        uren = groepen[key]
+        run_start = None
+        for uur in range(start_uur, eind_uur + 1):
+            is_nul = uur < eind_uur and uren.get(uur, 0) == 0
+            if is_nul and run_start is None:
+                run_start = uur
+            elif not is_nul and run_start is not None:
+                if uur - run_start >= min_run:
+                    gaten.append({"Locatie": key[0], "Voertuigtype": key[1],
+                                  "Richting": key[2], "Datum": key[3],
+                                  "van": run_start, "tot": uur, "uren": uur - run_start})
+                run_start = None
+    return gaten
+
+
+def gaten_overzicht_tekst(gaten):
+    if not gaten:
+        return "Geen gaten gevonden (06:00-24:00, minimaal 2 aaneengesloten lege uren)."
+    lines = [f"{len(gaten)} mogelijke gaten gevonden",
+             "(minimaal 2 aaneengesloten lege uren tussen 06:00 en 24:00):", ""]
+    for g in gaten:
+        datum = g["Datum"].strftime("%d-%m-%Y") if hasattr(g["Datum"], "strftime") else str(g["Datum"])
+        lines.append(f"- {g['Locatie']} | {g['Voertuigtype']} | {g['Richting']} | "
+                     f"{datum} | {g['van']:02d}:00-{g['tot']:02d}:00 ({g['uren']} uur leeg)")
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
 # Grafische applicatie
 # ---------------------------------------------------------------------------
 
@@ -417,6 +465,10 @@ class App:
         self.status.pack(side="left", fill="x", expand=True)
         tk.Button(onder, text="Verwerken en opslaan", width=22,
                   command=self.verwerken).pack(side="right")
+        tk.Button(onder, text="Controleer op gaten", width=20,
+                  command=self.controleer_gaten).pack(side="right", padx=6)
+        self.progress = ttk.Progressbar(onder, length=180, mode="determinate")
+        self.progress.pack(side="right", padx=6)
 
     # ----- dagdelen -----
     def _bouw_dagdelen(self, parent):
@@ -552,6 +604,40 @@ class App:
             self.map_widget.fit_bounding_box((max(lats), min(lons)), (min(lats), max(lons)))
 
     # ----- verwerken -----
+    def _parse_met_progress(self):
+        total = len(self.bu_files) + len(self.fiets_files)
+        self.progress.config(maximum=max(total, 1), value=0)
+        all_rows, telslang_headers, problemen = [], None, []
+        idx = 0
+        for path, label in ([(p, TELSLANG_VOERTUIGTYPE) for p in self.bu_files] +
+                            [(p, FIETS_VOERTUIGTYPE) for p in self.fiets_files]):
+            idx += 1
+            self.status.config(text=f"Bezig met inlezen: bestand {idx} van {total} — {Path(path).name}")
+            self.progress.config(value=idx)
+            self.root.update()
+            typed, headers = verwerk_bestand(path, label)
+            if label == TELSLANG_VOERTUIGTYPE and headers and telslang_headers is None:
+                telslang_headers = headers
+            if not typed:
+                soort = "gemotoriseerde" if label == TELSLANG_VOERTUIGTYPE else "fiets"
+                problemen.append(f"- {Path(path).name} (geen {soort} data gevonden)")
+            all_rows.extend(typed)
+        return all_rows, telslang_headers, problemen
+
+    def controleer_gaten(self):
+        if not self.bu_files and not self.fiets_files:
+            messagebox.showerror("Geen bestanden", "Voeg eerst bestanden toe.")
+            return
+        all_rows, _, _ = self._parse_met_progress()
+        self.progress.config(value=0)
+        if not all_rows:
+            self.status.config(text="Geen data gevonden.")
+            messagebox.showerror("Geen data", "Geen herkenbare data gevonden.")
+            return
+        gaten = vind_gaten(all_rows)
+        self.status.config(text=f"Gatencontrole klaar: {len(gaten)} mogelijke gaten.")
+        self._toon_gaten(gaten_overzicht_tekst(gaten), met_doorgaan=False)
+
     def verwerken(self):
         dd_strings = self._dd_lees()
         if dd_strings is None:
@@ -562,28 +648,21 @@ class App:
         schrijf_dagdelen_strings(basis_dir(), dd_strings)
         dagdelen = strings_naar_dagdelen(dd_strings)
 
-        self.status.config(text="Bezig met verwerken..."); self.root.update()
-
-        all_rows = []
-        telslang_headers = None
-        problemen = []
-        for path in self.bu_files:
-            typed, headers = verwerk_bestand(path, TELSLANG_VOERTUIGTYPE)
-            if headers and telslang_headers is None:
-                telslang_headers = headers
-            if not typed:
-                problemen.append(f"- {Path(path).name} (geen gemotoriseerde data gevonden)")
-            all_rows.extend(typed)
-        for path in self.fiets_files:
-            typed, _ = verwerk_bestand(path, FIETS_VOERTUIGTYPE)
-            if not typed:
-                problemen.append(f"- {Path(path).name} (geen fietsdata gevonden)")
-            all_rows.extend(typed)
-
+        all_rows, telslang_headers, problemen = self._parse_met_progress()
+        self.progress.config(value=0)
         if not all_rows:
             self.status.config(text="Geen data gevonden.")
             messagebox.showerror("Geen data", "In de gekozen bestanden is geen herkenbare data gevonden.")
             return
+
+        # Gatencontrole vóór het opslaan
+        gaten = vind_gaten(all_rows)
+        if gaten:
+            self.status.config(text=f"{len(gaten)} mogelijke gaten gevonden — controleer.")
+            doorgaan = self._toon_gaten(gaten_overzicht_tekst(gaten), met_doorgaan=True)
+            if not doorgaan:
+                self.status.config(text="Gestopt na gatencontrole.")
+                return
 
         out_header, out_rows = build_output(all_rows, telslang_headers, dagdelen)
         n_fiets = sum(1 for d in all_rows if d["Voertuigtype"] == FIETS_VOERTUIGTYPE)
@@ -595,19 +674,68 @@ class App:
         if not output_file:
             self.status.config(text="Opslaan geannuleerd.")
             return
+
+        self.status.config(text="Bezig met opslaan..."); self.root.update()
         try:
             schrijf_uitvoer(output_file, out_header, out_rows)
         except PermissionError:
+            self.status.config(text="Opslaan mislukt: bestand in gebruik.")
             messagebox.showerror("Bestand in gebruik",
                                  "Het doelbestand staat open (bv. in Excel). Sluit het en probeer opnieuw.")
             return
 
         self.status.config(text=f"Klaar: {len(out_rows)} rijen opgeslagen.")
         bericht = (f"{len(out_rows)} rijen geschreven naar:\n{output_file}\n\n"
-                   f"({n_fiets} fiets, {n_tel} gemotoriseerd)")
+                   f"({n_fiets} fiets, {n_tel} gemotoriseerd)\n")
+        bericht += (f"\nGatencontrole: {len(gaten)} mogelijke gaten gevonden."
+                    if gaten else "\nGatencontrole: geen gaten gevonden.")
         if problemen:
             bericht += "\n\nLet op, overgeslagen:\n" + "\n".join(problemen)
         messagebox.showinfo("Klaar", bericht)
+
+    def _toon_gaten(self, tekst, met_doorgaan):
+        dlg = tk.Toplevel(self.root)
+        dlg.title("Gatencontrole (06:00 - 24:00)")
+        dlg.geometry("720x470")
+        dlg.grab_set()
+
+        frame = tk.Frame(dlg)
+        frame.pack(fill="both", expand=True, padx=8, pady=8)
+        txt = tk.Text(frame, wrap="none")
+        ysb = tk.Scrollbar(frame, orient="vertical", command=txt.yview)
+        txt.configure(yscrollcommand=ysb.set)
+        ysb.pack(side="right", fill="y")
+        txt.pack(side="left", fill="both", expand=True)
+        txt.insert("1.0", tekst)
+        txt.config(state="disabled")
+
+        result = {"door": False}
+        knoppen = tk.Frame(dlg)
+        knoppen.pack(fill="x", padx=8, pady=(0, 8))
+
+        def opslaan_txt():
+            pad = filedialog.asksaveasfilename(
+                title="Overzicht opslaan", defaultextension=".txt",
+                initialfile="gatencontrole.txt", filetypes=[("Tekstbestand", "*.txt")])
+            if pad:
+                try:
+                    with open(pad, "w", encoding="utf-8") as f:
+                        f.write(tekst)
+                except OSError:
+                    pass
+
+        tk.Button(knoppen, text="Opslaan naar bestand", command=opslaan_txt).pack(side="left")
+        if met_doorgaan:
+            def door():
+                result["door"] = True
+                dlg.destroy()
+            tk.Button(knoppen, text="Annuleren", command=dlg.destroy).pack(side="right")
+            tk.Button(knoppen, text="Doorgaan met opslaan", command=door).pack(side="right", padx=6)
+        else:
+            tk.Button(knoppen, text="Sluiten", command=dlg.destroy).pack(side="right")
+
+        dlg.wait_window()
+        return result["door"]
 
 
 def main():
