@@ -22,6 +22,12 @@ try:
 except Exception:
     HAS_MAP = False
 
+try:
+    import win32com.client as win32
+    HAS_COM = True
+except Exception:
+    HAS_COM = False
+
 
 # Voertuigtype-labels in de uitvoer.
 FIETS_VOERTUIGTYPE = "fiets"
@@ -420,7 +426,145 @@ def kleur_kolomtitels(ws, out_header):
                 start_color=kl, end_color=kl, fill_type="solid")
 
 
+# ---------------------------------------------------------------------------
+# Draaitabellen / overzichten op extra tabbladen
+# ---------------------------------------------------------------------------
+
+def pivot_specs(out_header):
+    """Definieer de overzichtstabbladen op basis van beschikbare kolommen."""
+    specs = [
+        {"sheet": "Locatie x dagdeel", "rows": ["Locatie", "Voertuigtype"],
+         "col": "Dagdeel", "data": [("Totaal", "sum", "Som van Totaal")]},
+        {"sheet": "Locatie x weekdag-weekend", "rows": ["Locatie", "Voertuigtype"],
+         "col": "Dagsoort", "data": [("Totaal", "sum", "Som van Totaal")]},
+        {"sheet": "Etmaal per locatie per dag", "rows": ["Locatie", "Datum"],
+         "col": "Voertuigtype", "data": [("Totaal", "sum", "Som van Totaal")]},
+    ]
+    speed_cols = [h for h in out_header if h.startswith("Totaal snelheid ")]
+    if speed_cols:
+        data = [(c, "sum", f"Som {c}") for c in speed_cols]
+        if "Gem." in out_header:
+            data.append(("Gem.", "average", "Gemiddelde snelheid"))
+        if "V85" in out_header:
+            data.append(("V85", "average", "V85 (gem.)"))
+        specs.append({"sheet": "Snelheidsverdeling per loc", "rows": ["Locatie"],
+                      "col": None, "data": data})
+
+    geldig = []
+    for s in specs:
+        velden = list(s["rows"]) + ([s["col"]] if s["col"] else []) + [d[0] for d in s["data"]]
+        if all(v in out_header for v in velden):
+            geldig.append(s)
+    return geldig
+
+
+def _fmt_waarde(v):
+    return v.strftime("%d-%m-%Y") if hasattr(v, "strftime") else v
+
+
+def bereken_overzicht(out_header, out_rows, spec):
+    """Bereken een statische kruistabel (terugval als Excel ontbreekt)."""
+    idx = {h: i for i, h in enumerate(out_header)}
+    rows_f, col_f, datas = spec["rows"], spec["col"], spec["data"]
+
+    if col_f:
+        veld = datas[0][0]
+        col_values, rowkeys, cell = [], [], {}
+        for row in out_rows:
+            rk = tuple(_fmt_waarde(row[idx[f]]) for f in rows_f)
+            cv = _fmt_waarde(row[idx[col_f]])
+            if rk not in rowkeys:
+                rowkeys.append(rk)
+            if cv not in col_values:
+                col_values.append(cv)
+            x = row[idx[veld]]
+            cell[(rk, cv)] = cell.get((rk, cv), 0) + (x if isinstance(x, (int, float)) else 0)
+        header = list(rows_f) + [str(c) for c in col_values] + ["Eindtotaal"]
+        table = [header]
+        for rk in rowkeys:
+            line = list(rk); som = 0
+            for cv in col_values:
+                v = cell.get((rk, cv), 0)
+                line.append(v); som += v
+            line.append(som)
+            table.append(line)
+        return table
+
+    groups, rowkeys = {}, []
+    for row in out_rows:
+        rk = tuple(_fmt_waarde(row[idx[f]]) for f in rows_f)
+        if rk not in rowkeys:
+            rowkeys.append(rk)
+        g = groups.setdefault(rk, {})
+        for veld, _agg, _cap in datas:
+            acc = g.setdefault(veld, [0, 0])
+            x = row[idx[veld]]
+            acc[0] += x if isinstance(x, (int, float)) else 0
+            acc[1] += 1
+    header = list(rows_f) + [cap for _, _, cap in datas]
+    table = [header]
+    for rk in rowkeys:
+        line = list(rk)
+        for veld, agg, _cap in datas:
+            acc = groups[rk][veld]
+            v = acc[0] if agg == "sum" else (acc[0] / acc[1] if acc[1] else 0)
+            line.append(round(v, 2) if isinstance(v, float) else v)
+        table.append(line)
+    return table
+
+
+def voeg_static_overzichten_toe(wb, out_header, out_rows):
+    for spec in pivot_specs(out_header):
+        ws = wb.create_sheet(title=spec["sheet"][:31])
+        for r in bereken_overzicht(out_header, out_rows, spec):
+            ws.append(r)
+
+
+def voeg_pivots_toe_com(output_file, out_header, n_rows):
+    """Laat Excel echte interactieve draaitabellen maken op extra tabbladen."""
+    import gc
+    xlDatabase, xlRowField, xlColumnField = 1, 1, 2
+    xlSum, xlAverage = -4157, -4106
+    specs = pivot_specs(out_header)
+    excel = win32.DispatchEx("Excel.Application")
+    excel.Visible = False
+    excel.DisplayAlerts = False
+    wb = None
+    try:
+        wb = excel.Workbooks.Open(output_file)
+        data_ws = wb.Worksheets("Samengevoegd")
+        bron = data_ws.Range(data_ws.Cells(1, 1),
+                             data_ws.Cells(n_rows + 1, len(out_header)))
+        cache = wb.PivotCaches().Create(SourceType=xlDatabase, SourceData=bron)
+        # In omgekeerde volgorde aanmaken: Add zet een nieuw blad vooraan,
+        # zodat de bladen uiteindelijk in de juiste volgorde staan.
+        for n, spec in enumerate(reversed(specs), start=1):
+            ws = wb.Worksheets.Add()
+            ws.Name = spec["sheet"]
+            pt = cache.CreatePivotTable(TableDestination=ws.Cells(3, 1), TableName=f"Pivot{n}")
+            for rf in spec["rows"]:
+                pt.PivotFields(rf).Orientation = xlRowField
+            if spec["col"]:
+                pt.PivotFields(spec["col"]).Orientation = xlColumnField
+            for veld, agg, caption in spec["data"]:
+                pt.AddDataField(pt.PivotFields(veld), caption,
+                                xlAverage if agg == "average" else xlSum)
+        # Data-tabblad naar voren (positioneel; keyword Before/After bindt niet betrouwbaar)
+        data_ws.Move(wb.Worksheets(1))
+        wb.Save()
+    finally:
+        try:
+            if wb is not None:
+                wb.Close(SaveChanges=False)
+        except Exception:
+            pass
+        excel.Quit()
+        excel = None
+        gc.collect()
+
+
 def schrijf_uitvoer(output_file, out_header, out_rows):
+    """Schrijf de data weg en geef terug welke overzichten zijn toegevoegd."""
     datum_kolom = 3
     if output_file.lower().endswith(".xlsx"):
         wb = Workbook(); ws = wb.active; ws.title = "Samengevoegd"
@@ -430,7 +574,22 @@ def schrijf_uitvoer(output_file, out_header, out_rows):
         for ri in range(2, len(out_rows) + 2):
             ws.cell(row=ri, column=datum_kolom).number_format = "DD-MM-YYYY"
         kleur_kolomtitels(ws, out_header)
+        if not HAS_COM:
+            voeg_static_overzichten_toe(wb, out_header, out_rows)
         wb.save(output_file)
+        if HAS_COM:
+            try:
+                voeg_pivots_toe_com(output_file, out_header, len(out_rows))
+                return "interactief"
+            except Exception:
+                try:
+                    wb2 = load_workbook(output_file)
+                    voeg_static_overzichten_toe(wb2, out_header, out_rows)
+                    wb2.save(output_file)
+                except Exception:
+                    pass
+                return "statisch"
+        return "statisch"
     else:
         with open(output_file, "w", newline="", encoding="utf-8-sig") as f:
             writer = csv.writer(f, delimiter=";")
@@ -439,6 +598,7 @@ def schrijf_uitvoer(output_file, out_header, out_rows):
                 csv_row = list(row)
                 csv_row[datum_kolom - 1] = row[datum_kolom - 1].strftime("%d-%m-%Y")
                 writer.writerow(csv_row)
+        return "csv"
 
 
 # ---------------------------------------------------------------------------
@@ -788,9 +948,9 @@ class App:
             self.status.config(text="Opslaan geannuleerd.")
             return
 
-        self.status.config(text="Bezig met opslaan..."); self.root.update()
+        self.status.config(text="Bezig met opslaan en draaitabellen maken..."); self.root.update()
         try:
-            schrijf_uitvoer(output_file, out_header, out_rows)
+            note = schrijf_uitvoer(output_file, out_header, out_rows)
         except PermissionError:
             self.status.config(text="Opslaan mislukt: bestand in gebruik.")
             messagebox.showerror("Bestand in gebruik",
@@ -802,6 +962,10 @@ class App:
                    f"({n_fiets} fiets, {n_tel} gemotoriseerd)\n")
         bericht += (f"\nGatencontrole: {len(gaten)} mogelijke gaten gevonden."
                     if gaten else "\nGatencontrole: geen gaten gevonden.")
+        if note == "interactief":
+            bericht += "\nDraaitabellen: interactief toegevoegd op extra tabbladen."
+        elif note == "statisch":
+            bericht += "\nDraaitabellen: statische overzichten toegevoegd (geen Excel-automatisering)."
         if problemen:
             bericht += "\n\nLet op, overgeslagen:\n" + "\n".join(problemen)
         messagebox.showinfo("Klaar", bericht)
