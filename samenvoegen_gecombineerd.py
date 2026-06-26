@@ -269,6 +269,50 @@ def lees_info_coordinaten(path):
     return {"naam": naam, "plaats": plaats, "lat": lat, "lon": lon}
 
 
+def detecteer_type(path):
+    """Snelle detectie of een bestand fietsdata (weektabel) of telslang-data
+    (dagtabel) bevat. Geeft FIETS_VOERTUIGTYPE, TELSLANG_VOERTUIGTYPE of None.
+    Stopt bij de eerste tabelkop, dus snel."""
+    p = Path(path)
+    if p.suffix.lower() == ".csv":
+        try:
+            with open(path, "r", encoding="utf-8-sig") as f:
+                for i, row in enumerate(csv.reader(f, delimiter=";")):
+                    c0 = str(row[0]).strip() if row and row[0] is not None else ""
+                    if c0:
+                        if WEEK_HEADER.match(c0):
+                            return FIETS_VOERTUIGTYPE
+                        if DAG_HEADER.match(c0):
+                            return TELSLANG_VOERTUIGTYPE
+                    if i > 1000:
+                        break
+        except OSError:
+            return None
+        return None
+    try:
+        wb = load_workbook(path, read_only=True, data_only=True)
+    except Exception:
+        return None
+    try:
+        for s in wb.sheetnames:
+            if s.strip().lower() == "info":
+                continue
+            cnt = 0
+            for row in wb[s].iter_rows(values_only=True):
+                c0 = str(row[0]).strip() if row and row[0] is not None else ""
+                if c0:
+                    if WEEK_HEADER.match(c0):
+                        return FIETS_VOERTUIGTYPE
+                    if DAG_HEADER.match(c0):
+                        return TELSLANG_VOERTUIGTYPE
+                cnt += 1
+                if cnt > 300:
+                    break
+    finally:
+        wb.close()
+    return None
+
+
 def verwerk_bestand(path, verwacht_label):
     """Lees een bestand en geef de rijen van het verwachte type terug.
     Voor xlsx wordt automatisch het juiste data-tabblad gekozen."""
@@ -456,8 +500,6 @@ class App:
         root.geometry("1180x700")
         root.minsize(980, 600)
 
-        self.bu_files = []
-        self.fiets_files = []
         self.coords = {}   # path -> {naam, plaats, lat, lon}
         self.dd_rows = []
 
@@ -468,12 +510,22 @@ class App:
         links.grid(row=0, column=0, sticky="ns", padx=8, pady=8)
 
         self._bouw_dagdelen(links)
-        self.bu_listbox = self._bouw_dropzone(
+        self.bu_zone = self._bouw_dropzone(
             links, "Gemotoriseerd vervoer",
-            "dit zijn meestal de BU-bestanden", self.bu_files, TELSLANG_VOERTUIGTYPE)
-        self.fiets_listbox = self._bouw_dropzone(
+            "dit zijn meestal de BU-bestanden", TELSLANG_VOERTUIGTYPE)
+        self.fiets_zone = self._bouw_dropzone(
             links, "Fietsen",
-            "dit zijn meestal de TU-xxx-fiets bestanden", self.fiets_files, FIETS_VOERTUIGTYPE)
+            "dit zijn meestal de TU-xxx-fiets bestanden", FIETS_VOERTUIGTYPE)
+        # aliassen zodat de overige code blijft werken
+        self.bu_files = self.bu_zone["files"]
+        self.fiets_files = self.fiets_zone["files"]
+        # verplaats-knoppen naar het andere veld koppelen
+        self.bu_zone["move_btn"].config(
+            text="Verplaats selectie naar Fietsen",
+            command=lambda: self._verplaats(self.bu_zone, self.fiets_zone))
+        self.fiets_zone["move_btn"].config(
+            text="Verplaats selectie naar Gemotoriseerd",
+            command=lambda: self._verplaats(self.fiets_zone, self.bu_zone))
 
         # Kaart
         kaart_frame = tk.LabelFrame(root, text="Locaties (controle op compleetheid)")
@@ -556,63 +608,93 @@ class App:
         return rijen
 
     # ----- dropzones -----
-    def _bouw_dropzone(self, parent, titel, hint, file_list, categorie):
+    def _bouw_dropzone(self, parent, titel, hint, categorie):
+        zone = {"files": [], "categorie": categorie, "naam": titel}
         frame = tk.LabelFrame(parent, text=titel)
         frame.pack(fill="both", expand=True, pady=(0, 8))
         tk.Label(frame, text=hint, fg="#555").pack(anchor="w", padx=6, pady=(2, 0))
 
         listbox = tk.Listbox(frame, width=40, height=6, selectmode="extended")
         listbox.pack(fill="both", expand=True, padx=6, pady=4)
+        zone["listbox"] = listbox
 
         if HAS_DND:
             listbox.drop_target_register(DND_FILES)
-            listbox.dnd_bind("<<Drop>>",
-                             lambda e, fl=file_list, lb=listbox: self._op_drop(e, fl, lb))
+            listbox.dnd_bind("<<Drop>>", lambda e, z=zone: self._op_drop(e, z))
 
-        btns = tk.Frame(frame); btns.pack(fill="x", padx=6, pady=(0, 4))
+        btns = tk.Frame(frame); btns.pack(fill="x", padx=6, pady=(0, 2))
         tk.Button(btns, text="Bladeren...",
-                  command=lambda fl=file_list, lb=listbox: self._bladeren(fl, lb)).pack(side="left")
+                  command=lambda z=zone: self._bladeren(z)).pack(side="left")
         tk.Button(btns, text="Wissen",
-                  command=lambda fl=file_list, lb=listbox: self._wissen(fl, lb)).pack(side="left", padx=4)
-        return listbox
+                  command=lambda z=zone: self._wissen(z)).pack(side="left", padx=4)
 
-    def _op_drop(self, event, file_list, listbox):
-        paden = self.root.tk.splitlist(event.data)
-        self._voeg_toe(paden, file_list, listbox)
+        move_btn = tk.Button(frame, text="Verplaats selectie")
+        move_btn.pack(fill="x", padx=6, pady=(0, 4))
+        zone["move_btn"] = move_btn
+        return zone
 
-    def _bladeren(self, file_list, listbox):
+    def _op_drop(self, event, zone):
+        self._voeg_toe(self.root.tk.splitlist(event.data), zone)
+
+    def _bladeren(self, zone):
         paden = filedialog.askopenfilenames(
             title="Selecteer bestanden",
             filetypes=[("Excel/CSV", "*.xlsx *.csv"), ("Alle bestanden", "*.*")])
-        self._voeg_toe(paden, file_list, listbox)
+        self._voeg_toe(paden, zone)
 
-    def _voeg_toe(self, paden, file_list, listbox):
-        toegevoegd = 0
+    def _voeg_toe(self, paden, zone):
         for p in paden:
             p = str(p)
             if not (p.lower().endswith(".xlsx") or p.lower().endswith(".csv")):
                 continue
-            if p in file_list:
+            if p in zone["files"]:
                 continue
-            file_list.append(p)
-            listbox.insert("end", Path(p).name)
+            # typecontrole: lijkt het bestand op het andere type?
+            self.status.config(text=f"Controleren: {Path(p).name}..."); self.root.update()
+            gedetecteerd = detecteer_type(p)
+            if gedetecteerd and gedetecteerd != zone["categorie"]:
+                anders = ("een fietsbestand" if gedetecteerd == FIETS_VOERTUIGTYPE
+                          else "een bestand voor gemotoriseerd vervoer")
+                dit_veld = ("gemotoriseerd vervoer" if zone["categorie"] == TELSLANG_VOERTUIGTYPE
+                            else "fietsen")
+                if not messagebox.askyesno(
+                        "Klopt het type?",
+                        f"'{Path(p).name}' lijkt op {anders}.\n\n"
+                        f"Weet je zeker dat dit een bestand voor {dit_veld} is?"):
+                    continue
+            zone["files"].append(p)
+            zone["listbox"].insert("end", Path(p).name)
             if p.lower().endswith(".xlsx"):
                 info = lees_info_coordinaten(p)
                 if info:
                     self.coords[p] = info
-            toegevoegd += 1
-        if toegevoegd:
-            self._ververs_kaart()
-            self.status.config(
-                text=f"{len(self.bu_files)} gemotoriseerd, {len(self.fiets_files)} fiets — "
-                     f"{len(self.coords)} locatie(s) op de kaart.")
-
-    def _wissen(self, file_list, listbox):
-        for p in list(file_list):
-            self.coords.pop(p, None)
-        file_list.clear()
-        listbox.delete(0, "end")
         self._ververs_kaart()
+        self.status.config(
+            text=f"{len(self.bu_files)} gemotoriseerd, {len(self.fiets_files)} fiets — "
+                 f"{len(self.coords)} locatie(s) op de kaart.")
+
+    def _wissen(self, zone):
+        zone["files"].clear()
+        zone["listbox"].delete(0, "end")
+        self._ververs_kaart()
+
+    def _verplaats(self, bron, doel):
+        sel = list(bron["listbox"].curselection())
+        if not sel:
+            messagebox.showinfo("Niets geselecteerd",
+                                "Selecteer eerst één of meer bestanden in de lijst om te verplaatsen.")
+            return
+        verplaatst = 0
+        for i in reversed(sel):
+            path = bron["files"][i]
+            del bron["files"][i]
+            bron["listbox"].delete(i)
+            if path not in doel["files"]:
+                doel["files"].append(path)
+                doel["listbox"].insert("end", Path(path).name)
+                verplaatst += 1
+        self._ververs_kaart()
+        self.status.config(text=f"{verplaatst} bestand(en) verplaatst naar {doel['naam']}.")
 
     def _ververs_kaart(self):
         if not self.map_widget:
