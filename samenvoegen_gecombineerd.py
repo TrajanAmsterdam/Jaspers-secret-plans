@@ -130,6 +130,15 @@ def bepaal_dagsoort(datum):
     return "weekenddag" if datum.weekday() >= 5 else "weekdag"
 
 
+def eindtijd_van(tijd_str):
+    """Geeft de eindtijd: starttijd + 1 uur. 23:00 -> 24:00."""
+    m = _tijd_naar_minuten(tijd_str)
+    if m is None:
+        return ""
+    h, mi = divmod(m + 60, 60)
+    return f"{h:02d}:{mi:02d}"
+
+
 # ---------------------------------------------------------------------------
 # Inlezen / parsen
 # ---------------------------------------------------------------------------
@@ -369,7 +378,7 @@ def build_output(all_rows, telslang_headers, dagdelen):
     if telslang_headers:
         lengte_groepen, snelheid_groepen = groepeer_klassen(telslang_headers)
 
-    columns = ["Locatie", "Voertuigtype", "Datum", "Dagsoort", "Tijd", "Dagdeel", "Richting"]
+    columns = ["Locatie", "Voertuigtype", "Datum", "Dagsoort", "Van", "Tot", "Dagdeel", "Richting"]
     if telslang_headers:
         columns += list(telslang_headers)
         columns += [f"Totaal lengte {l}" for l in lengte_groepen]
@@ -382,7 +391,7 @@ def build_output(all_rows, telslang_headers, dagdelen):
         dagsoort = bepaal_dagsoort(d["Datum"])
         dagdeel = bepaal_dagdeel(d["Tijd"], dagdelen)
         row = [d["Locatie"], d["Voertuigtype"], d["Datum"], dagsoort,
-               d["Tijd"], dagdeel, d["Richting"]]
+               d["Tijd"], eindtijd_van(d["Tijd"]), dagdeel, d["Richting"]]
         if telslang_headers:
             is_tel = bool(d["classes"])
             for h in telslang_headers:
