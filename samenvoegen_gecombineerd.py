@@ -229,27 +229,41 @@ def parse_rows(rows):
                 richting = dm.group(2).strip()
                 header1 = rows[i + 1] if i + 1 < n else []
                 header2 = rows[i + 2] if i + 2 < n else []
-                block_headers = []
-                for j in range(1, 25):
-                    lc = str(header1[j]).strip() if j < len(header1) else ""
-                    sc = str(header2[j]).strip() if j < len(header2) else ""
-                    block_headers.append(f"{lc};{sc}")
+                # Kolommen dynamisch bepalen i.p.v. vaste posities. Een
+                # klassekolom heeft een snelheids-subkop (header2); kolommen
+                # zonder subkop zijn samenvattingen (% >=30, V50, V85, V90,
+                # Gem., Totaal, ...). Zo werkt het ongeacht het aantal lengte-
+                # of snelheidsklassen (bv. 24 of 28 klassekolommen).
+                block_headers = []      # namen "lengte;snelheid" op volgorde
+                class_cols = []         # (kolomindex, naam)
+                summary_cols = {}       # samenvattingsnaam -> kolomindex
+                breedte = max(len(header1), len(header2))
+                for j in range(1, breedte):
+                    lc = str(header1[j]).strip() if j < len(header1) and header1[j] is not None else ""
+                    sc = str(header2[j]).strip() if j < len(header2) and header2[j] is not None else ""
+                    if sc:
+                        h = f"{lc};{sc}"
+                        block_headers.append(h)
+                        class_cols.append((j, h))
+                    elif lc:
+                        summary_cols.setdefault(lc, j)
                 if telslang_headers is None:
                     telslang_headers = block_headers
+                j_v85, j_gem, j_tot = (summary_cols.get("V85"),
+                                       summary_cols.get("Gem."),
+                                       summary_cols.get("Totaal"))
                 i += 3
                 while i < n and _cell0(rows[i]):
                     dr = rows[i]
                     tijd = str(dr[0]).strip()
                     classes = {}
-                    for k, h in enumerate(block_headers):
-                        j = k + 1
+                    for j, h in class_cols:
                         classes[h] = to_number(dr[j]) if j < len(dr) else ""
-                    v85 = to_number(dr[27]) if len(dr) > 27 else ""
-                    gem = to_number(dr[29]) if len(dr) > 29 else ""
-                    totaal = to_number(dr[30]) if len(dr) > 30 else ""
+                    def _sv(j):
+                        return to_number(dr[j]) if (j is not None and j < len(dr)) else ""
                     data.append({"Voertuigtype": TELSLANG_VOERTUIGTYPE, "Datum": datum,
                                  "Tijd": tijd, "Richting": richting, "classes": classes,
-                                 "V85": v85, "Gem.": gem, "Totaal": totaal})
+                                 "V85": _sv(j_v85), "Gem.": _sv(j_gem), "Totaal": _sv(j_tot)})
                     i += 1
                 continue
         i += 1
@@ -902,8 +916,15 @@ class App:
             self.progress.config(value=idx)
             self.root.update()
             typed, headers = verwerk_bestand(path, label)
-            if label == TELSLANG_VOERTUIGTYPE and headers and telslang_headers is None:
-                telslang_headers = headers
+            if label == TELSLANG_VOERTUIGTYPE and headers:
+                # Headers samenvoegen (union) zodat kolommen van álle bestanden
+                # meekomen, ook als locaties verschillende klasse-indelingen hebben.
+                if telslang_headers is None:
+                    telslang_headers = list(headers)
+                else:
+                    for h in headers:
+                        if h not in telslang_headers:
+                            telslang_headers.append(h)
             if not typed:
                 soort = "gemotoriseerde" if label == TELSLANG_VOERTUIGTYPE else "fiets"
                 problemen.append(f"- {Path(path).name} (geen {soort} data gevonden)")
