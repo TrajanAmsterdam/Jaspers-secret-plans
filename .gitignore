@@ -9,3 +9,18 @@ __pycache__/
 
 # Runtime-config (wordt naast de exe aangemaakt door de gebruiker)
 dagdelen.csv
+
+# Eigen repository, niet meetracken in deze repo
+iso27001-controls/
+
+# Exports met persoonsgegevens en gegenereerde werkbestanden
+AppInvRawData*.csv
+*.xlsx
+
+# Uitvoer van monday_fix_uitvoerende.py (bevat namen en toewijzingen)
+monday_resultaat_*.csv
+monday_plan.txt
+monday_*log*.txt
+
+# Lokale Claude Code-configuratie
+.claude/
